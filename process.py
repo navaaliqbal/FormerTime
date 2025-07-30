@@ -2,7 +2,6 @@ import time
 import torch
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-from tqdm import tqdm
 from loss import CE, BCE
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -51,10 +50,10 @@ class Trainer():
     def _train_one_epoch(self):
         t0 = time.perf_counter()
         self.model.train()
-        tqdm_dataloader = tqdm(self.train_loader) if self.verbose else self.train_loader
+        dataloader = self.train_loader
 
         loss_sum = 0
-        for idx, batch in enumerate(tqdm_dataloader):
+        for idx, batch in enumerate(dataloader):
             batch = [x.to(self.device) for x in batch]
 
             self.optimizer.zero_grad()
@@ -68,34 +67,40 @@ class Trainer():
             self.step += 1
             if self.step % self.lr_decay_steps == 0:
                 self.scheduler.step()
+
             if self.step % self.eval_per_steps == 0:
-                metric = self.eval_model()
-                self.print_process(metric)
-                self.result_file = open(self.save_path + '/result.txt', 'a+')
-                print('step{0}'.format(self.step), file=self.result_file)
-                print(metric, file=self.result_file)
-                self.result_file.close()
-                if metric[self.metric] >= self.best_metric:
+                test_metric = self.eval_model()
+                train_metric = self.eval_model(data_loader=self.train_loader, split_name='train')
+
+                self.print_process(f"Train: {train_metric}")
+                self.print_process(f"Test: {test_metric}")
+
+                with open(self.save_path + '/result.txt', 'a+') as f:
+                    print(f"\nStep {self.step}", file=f)
+                    print("Train:", train_metric, file=f)
+                    print("Test:", test_metric, file=f)
+
+                if test_metric[self.metric] >= self.best_metric:
                     if self.args.save_model:
                         torch.save(self.model.state_dict(), self.save_path + '/model.pkl')
-                    self.result_file = open(self.save_path + '/result.txt', 'a+')
-                    print('saving model of step{0}'.format(self.step), file=self.result_file)
-                    self.result_file.close()
-                    self.best_metric = metric[self.metric]
+                    with open(self.save_path + '/result.txt', 'a+') as f:
+                        print(f"Saving model at step {self.step}", file=f)
+                    self.best_metric = test_metric[self.metric]
+
                 self.model.train()
 
         return loss_sum / (idx + 1), time.perf_counter() - t0
 
-    def eval_model(self):
+    def eval_model(self, data_loader=None, split_name='test'):
         self.model.eval()
-        tqdm_data_loader = tqdm(self.test_loader) if self.verbose else self.test_loader
+        data_loader = data_loader or self.test_loader
         metrics = {'acc': 0, 'f1': 0}
         pred = []
         label = []
-        test_loss = 0
+        total_loss = 0
 
         with torch.no_grad():
-            for idx, batch in enumerate(tqdm_data_loader):
+            for idx, batch in enumerate(data_loader):
                 batch = [x.to(self.device) for x in batch]
                 ret = self.compute_metrics(batch)
                 if len(ret) == 2:
@@ -103,24 +108,28 @@ class Trainer():
                     pred += pred_b
                     label += label_b
                 else:
-                    pred_b, label_b, test_loss_b = ret
+                    pred_b, label_b, loss_b = ret
                     pred += pred_b
                     label += label_b
-                    test_loss += test_loss_b.cpu().item()
+                    total_loss += loss_b.cpu().item()
+
         confusion_mat = self._confusion_mat(label, pred)
+        self.print_process(f"{split_name} confusion matrix:")
         self.print_process(confusion_mat)
-        self.result_file = open(self.save_path + '/result.txt', 'a+')
-        print(confusion_mat, file=self.result_file)
-        self.result_file.close()
+        with open(self.save_path + '/result.txt', 'a+') as f:
+            print(f"{split_name} confusion matrix:", file=f)
+            print(confusion_mat, file=f)
+
         if self.args.num_class == 2:
-            metrics['f1'] = f1_score(y_true=label, y_pred=pred)
-            metrics['precision'] = precision_score(y_true=label, y_pred=pred)
-            metrics['recall'] = recall_score(y_true=label, y_pred=pred)
+            metrics['f1'] = f1_score(label, pred)
+            metrics['precision'] = precision_score(label, pred)
+            metrics['recall'] = recall_score(label, pred)
         else:
-            metrics['f1'] = f1_score(y_true=label, y_pred=pred, average='macro')
-            metrics['micro_f1'] = f1_score(y_true=label, y_pred=pred, average='micro')
-        metrics['acc'] = accuracy_score(y_true=label, y_pred=pred)
-        metrics['test_loss'] = test_loss / (idx + 1)
+            metrics['f1'] = f1_score(label, pred, average='macro')
+            metrics['micro_f1'] = f1_score(label, pred, average='micro')
+
+        metrics['acc'] = accuracy_score(label, pred)
+        metrics[f'{split_name}_loss'] = total_loss / (idx + 1)
         return metrics
 
     def compute_metrics(self, batch):
