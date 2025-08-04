@@ -53,43 +53,52 @@ class Trainer():
         dataloader = self.train_loader
 
         loss_sum = 0
+        accumulation_steps = 2  # Accumulate gradients over 2 batches
+
         for idx, batch in enumerate(dataloader):
             batch = [x.to(self.device) for x in batch]
 
-            self.optimizer.zero_grad()
+            # Zero grad only at the start of each accumulation cycle
+            if idx % accumulation_steps == 0:
+                self.optimizer.zero_grad()
+
             loss = self.cr.compute(batch)
-            loss_sum += loss.item()
-
+            loss = loss / accumulation_steps  # Normalize loss
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-            self.optimizer.step()
+            loss_sum += loss.item() * accumulation_steps  # Undo normalization for logging
 
-            self.step += 1
-            if self.step % self.lr_decay_steps == 0:
-                self.scheduler.step()
+            # Step optimizer after accumulation
+            if (idx + 1) % accumulation_steps == 0 or (idx + 1) == len(dataloader):
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+                self.optimizer.step()
 
-            if self.step % self.eval_per_steps == 0:
-                test_metric = self.eval_model()
-                train_metric = self.eval_model(data_loader=self.train_loader, split_name='train')
+                self.step += 1
+                if self.step % self.lr_decay_steps == 0:
+                    self.scheduler.step()
 
-                self.print_process(f"Train: {train_metric}")
-                self.print_process(f"Test: {test_metric}")
+                if self.step % self.eval_per_steps == 0:
+                    test_metric = self.eval_model()
+                    train_metric = self.eval_model(data_loader=self.train_loader, split_name='train')
 
-                with open(self.save_path + '/result.txt', 'a+') as f:
-                    print(f"\nStep {self.step}", file=f)
-                    print("Train:", train_metric, file=f)
-                    print("Test:", test_metric, file=f)
+                    self.print_process(f"Train: {train_metric}")
+                    self.print_process(f"Test: {test_metric}")
 
-                if test_metric[self.metric] >= self.best_metric:
-                    if self.args.save_model:
-                        torch.save(self.model.state_dict(), self.save_path + '/model.pkl')
                     with open(self.save_path + '/result.txt', 'a+') as f:
-                        print(f"Saving model at step {self.step}", file=f)
-                    self.best_metric = test_metric[self.metric]
+                        print(f"\nStep {self.step}", file=f)
+                        print("Train:", train_metric, file=f)
+                        print("Test:", test_metric, file=f)
 
-                self.model.train()
+                    if test_metric[self.metric] >= self.best_metric:
+                        if self.args.save_model:
+                            torch.save(self.model.state_dict(), self.save_path + '/model.pkl')
+                        with open(self.save_path + '/result.txt', 'a+') as f:
+                            print(f"Saving model at step {self.step}", file=f)
+                        self.best_metric = test_metric[self.metric]
+
+                    self.model.train()
 
         return loss_sum / (idx + 1), time.perf_counter() - t0
+
 
     def eval_model(self, data_loader=None, split_name='test'):
         self.model.eval()
